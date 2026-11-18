@@ -1,0 +1,14 @@
+# Logs & Backups
+*.bak
+*.log
+*.swp
+*.swo
+*~
+
+# Neovim local state
+.ryoku-*
+.netrwhist
+
+# OS junk
+.DS_Store
+Thumbs.db

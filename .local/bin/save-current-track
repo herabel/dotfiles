@@ -1,0 +1,51 @@
+#!/bin/bash
+set -euo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+radio_status="$runtime_dir/ryoku-radio-atlas/status.json"
+
+track=""
+source_label=""
+
+# 1. Check Radio Atlas live status first
+if [[ -f "$radio_status" ]]; then
+    is_running=$(jq -r '.running // false' "$radio_status" 2>/dev/null || true)
+    is_paused=$(jq -r '.paused // false' "$radio_status" 2>/dev/null || true)
+    title=$(jq -r '.title // empty' "$radio_status" 2>/dev/null || true)
+    station=$(jq -r '.station.name // empty' "$radio_status" 2>/dev/null || true)
+
+    if [[ "$is_running" == "true" && "$is_paused" != "true" && -n "$title" ]]; then
+        track="$title"
+        source_label="Радио: $station"
+    fi
+fi
+
+# 2. Fallback to playerctl if radio is not actively playing
+if [[ -z "$track" ]]; then
+    track=$(playerctl metadata --format '{{ artist }} — {{ title }}' 2>/dev/null || true)
+    if [[ -z $track || $track == " — " ]]; then
+        track=$(playerctl metadata title 2>/dev/null || true)
+    fi
+    if [[ -n "$track" ]]; then
+        player_name=$(playerctl metadata --format '{{ playerName }}' 2>/dev/null || true)
+        source_label="Плеер: ${player_name:-Медиа}"
+    fi
+fi
+
+# 3. If nothing is playing
+if [[ -z "$track" ]]; then
+    notify-send -u low -i audio-speakers "Музыка" "Сейчас ничего не играет"
+    exit 0
+fi
+
+# Copy clean track title to Wayland clipboard
+printf '%s' "$track" | wl-copy 2>/dev/null || true
+
+# Append to history file
+mkdir -p "$HOME/Music"
+log_file="$HOME/Music/radio_gems.txt"
+date_str=$(date '+%Y-%m-%d %H:%M')
+echo "[$date_str] [${source_label}] $track" >> "$log_file"
+
+# Show notification
+notify-send -u normal -i audio-x-generic "🎵 Трек скопирован!" "$track\n($source_label)"

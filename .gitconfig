@@ -1,0 +1,10 @@
+[user]
+	name = herabel
+	email = 3423.0a@mail.ru
+[init]
+	defaultBranch = main
+[core]
+	pager = bat
+	autocrlf = input
+[pull]
+	rebase = false
