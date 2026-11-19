@@ -1,51 +1,179 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# save-current-track — Universal audio identifier, recorder & metadata saver
+# Works on any Arch / Linux system with PipeWire / PulseAudio.
+# Dependencies: ffmpeg, songrec, playerctl, jq, libnotify, wl-clipboard (or xclip)
+
 set -euo pipefail
 
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-radio_status="$runtime_dir/ryoku-radio-atlas/status.json"
+captures_dir="${MUSIC_DIR:-$HOME/Music}/radio_captures"
+log_file="${MUSIC_DIR:-$HOME/Music}/radio_gems.txt"
+
+mkdir -p "$(dirname "$log_file")" "$captures_dir"
+
+# Clipboard helper (Wayland / X11 fallback)
+copy_to_clipboard() {
+    local text="$1"
+    if command -v wl-copy >/dev/null 2>&1; then
+        printf '%s' "$text" | wl-copy 2>/dev/null || true
+    elif command -v xclip >/dev/null 2>&1; then
+        printf '%s' "$text" | xclip -selection clipboard 2>/dev/null || true
+    fi
+}
 
 track=""
 source_label=""
+stream_url=""
+source_tag="Desktop"
 
-# 1. Check Radio Atlas live status first
-if [[ -f "$radio_status" ]]; then
+# 1. Discover generic radio / web stream status (if present in runtime directory)
+radio_status=$(find "$runtime_dir" -maxdepth 2 -name "status.json" 2>/dev/null | head -n 1 || true)
+if [[ -n "$radio_status" && -f "$radio_status" ]]; then
     is_running=$(jq -r '.running // false' "$radio_status" 2>/dev/null || true)
     is_paused=$(jq -r '.paused // false' "$radio_status" 2>/dev/null || true)
     title=$(jq -r '.title // empty' "$radio_status" 2>/dev/null || true)
-    station=$(jq -r '.station.name // empty' "$radio_status" 2>/dev/null || true)
+    station_name=$(jq -r '.station.name // empty' "$radio_status" 2>/dev/null || true)
 
     if [[ "$is_running" == "true" && "$is_paused" != "true" && -n "$title" ]]; then
         track="$title"
-        source_label="Радио: $station"
+        source_label="Радио: ${station_name:-Интернет-радио}"
+        source_tag="${station_name:-Radio}"
+
+        # Check for generic mpv IPC socket to grab direct digital stream
+        mpv_sock=$(find "$runtime_dir" -maxdepth 2 -name "*mpv*.sock" 2>/dev/null | head -n 1 || true)
+        if [[ -n "$mpv_sock" && -S "$mpv_sock" ]] && command -v socat >/dev/null 2>&1; then
+            stream_url=$(echo '{ "command": ["get_property", "path"] }' | socat - "$mpv_sock" 2>/dev/null | jq -r '.data // empty' || true)
+        fi
     fi
 fi
 
-# 2. Fallback to playerctl if radio is not actively playing
+# 2. Check standard MPRIS players (Spotify, Firefox, Chromium, MPV, VLC, Telegram, etc.)
+if [[ -z "$track" ]] && command -v playerctl >/dev/null 2>&1; then
+    player_name=$(playerctl metadata --format '{{ playerName }}' 2>/dev/null || true)
+
+    if [[ -n "$player_name" ]]; then
+        artist=$(playerctl metadata --format '{{ artist }}' 2>/dev/null || true)
+        title=$(playerctl metadata --format '{{ title }}' 2>/dev/null || true)
+
+        if [[ -n "$title" && -n "$artist" && "$artist" != "$title" ]]; then
+            track="${artist} — ${title}"
+        elif [[ -n "$title" ]]; then
+            track="$title"
+        fi
+
+        source_label="Плеер: ${player_name}"
+        source_tag="${player_name}"
+    fi
+fi
+
+# 3. Fallback: generic system desktop audio
 if [[ -z "$track" ]]; then
-    track=$(playerctl metadata --format '{{ artist }} — {{ title }}' 2>/dev/null || true)
-    if [[ -z $track || $track == " — " ]]; then
-        track=$(playerctl metadata title 2>/dev/null || true)
-    fi
-    if [[ -n "$track" ]]; then
-        player_name=$(playerctl metadata --format '{{ playerName }}' 2>/dev/null || true)
-        source_label="Плеер: ${player_name:-Медиа}"
-    fi
+    source_label="Система: Рабочий стол"
+    source_tag="Desktop"
+    track="Аудиопоток"
 fi
 
-# 3. If nothing is playing
-if [[ -z "$track" ]]; then
-    notify-send -u low -i audio-speakers "Музыка" "Сейчас ничего не играет"
-    exit 0
+# Copy immediate known title to clipboard
+if [[ "$track" != "Аудиопоток" ]]; then
+    copy_to_clipboard "$track"
 fi
 
-# Copy clean track title to Wayland clipboard
-printf '%s' "$track" | wl-copy 2>/dev/null || true
+# Function to record audio snippet and identify via Shazam API (SongRec)
+run_record_and_shazam() {
+    local source_name="$1"
+    local raw_track="$2"
+    local source_display="$3"
+    local direct_url="$4"
 
-# Append to history file
-mkdir -p "$HOME/Music"
-log_file="$HOME/Music/radio_gems.txt"
-date_str=$(date '+%Y-%m-%d %H:%M')
-echo "[$date_str] [${source_label}] $track" >> "$log_file"
+    local ts
+    ts=$(date '+%Y-%m-%d_%H-%M-%S')
 
-# Show notification
-notify-send -u normal -i audio-x-generic "🎵 Трек скопирован!" "$track\n($source_label)"
+    local safe_source
+    safe_source=$(echo "$source_name" | tr -cs 'a-zA-Z0-9_-' '_' | sed 's/^_//;s/_$//')
+    safe_source="${safe_source:-Audio}"
+
+    local temp_file="$captures_dir/${ts}_[${safe_source}]_recording.mp3"
+
+    # Step 1: Capture 12-second audio sample
+    # Direct stream URL if available, otherwise default sink monitor (headphones/speakers)
+    if [[ -n "$direct_url" ]]; then
+        ffmpeg -y -t 12 -i "$direct_url" -c:a libmp3lame -b:a 192k "$temp_file" >/dev/null 2>&1 || true
+    fi
+
+    if [[ ! -s "$temp_file" ]]; then
+        ffmpeg -y -t 12 -f pulse -i "@DEFAULT_SINK@.monitor" -c:a libmp3lame -b:a 192k "$temp_file" >/dev/null 2>&1 || true
+    fi
+
+    if [[ ! -s "$temp_file" ]]; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -u low -i dialog-warning "Запись звука" "Не удалось записать аудиопоток"
+        fi
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # Detect complete silence (< -65 dB) to avoid saving empty noise
+    local max_vol
+    max_vol=$(ffmpeg -i "$temp_file" -af volumedetect -f null /dev/null 2>&1 | grep -i "max_volume:" | awk '{print $5}' || true)
+    if [[ "$max_vol" == "-inf" || $(awk "BEGIN {print ($max_vol < -65.0)}") -eq 1 ]] 2>/dev/null; then
+        rm -f "$temp_file"
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -u low -i audio-volume-muted "Музыка" "В системе сейчас тишина — запись отменена"
+        fi
+        return 0
+    fi
+
+    # Step 2: Query Shazam API via SongRec
+    local shazam_json=""
+    if command -v songrec >/dev/null 2>&1; then
+        shazam_json=$(songrec audio-file-to-recognized-song "$temp_file" 2>/dev/null || true)
+    fi
+
+    local shazam_artist=""
+    local shazam_title=""
+    if [[ -n "$shazam_json" ]]; then
+        shazam_artist=$(jq -r '.track.subtitle // empty' <<< "$shazam_json" 2>/dev/null || true)
+        shazam_title=$(jq -r '.track.title // empty' <<< "$shazam_json" 2>/dev/null || true)
+    fi
+
+    local cur_time
+    cur_time=$(date '+%Y-%m-%d %H:%M')
+
+    if [[ -n "$shazam_title" ]]; then
+        local recognized="${shazam_artist} — ${shazam_title}"
+        local safe_title
+        safe_title=$(echo "$recognized" | tr '/\\:*?"<>|' '_' | sed 's/  */ /g')
+        local final_file="$captures_dir/${ts}_[${safe_source}]_${safe_title}.mp3"
+
+        mv "$temp_file" "$final_file"
+
+        # Update clipboard with recognized track
+        copy_to_clipboard "$recognized"
+
+        # Log recognized track
+        echo "[$cur_time] [${source_display}] 🔍 Shazam: $recognized (Источник: $raw_track) -> $(basename "$final_file")" >> "$log_file"
+
+        # Notify user
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -u normal -i audio-x-generic "🎵 Shazam: найден трек!" "$recognized\nСкопировано в буфер | $(basename "$final_file")"
+        fi
+    else
+        local final_file="$captures_dir/${ts}_[${safe_source}]_unmatched.mp3"
+        mv "$temp_file" "$final_file"
+
+        echo "[$cur_time] [${source_display}] $raw_track -> $(basename "$final_file") (Shazam: без совпадений)" >> "$log_file"
+
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -u low -i audio-speakers "💾 Сэмпл сохранён" "$raw_track\nФайл: $(basename "$final_file") (в Shazam нет)"
+        fi
+    fi
+}
+
+# Immediate feedback notification
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -u normal -i audio-x-generic "$source_label" "$track\nЗаписываю сэмпл для Shazam..."
+fi
+
+# Run background recording & recognition
+run_record_and_shazam "$source_tag" "$track" "$source_label" "$stream_url" </dev/null >/dev/null 2>&1 &
+disown
