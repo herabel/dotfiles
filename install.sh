@@ -8,7 +8,7 @@ BIN_DIR="$HOME/.local/bin"
 
 echo "==> Deploying dotfiles from $DOTFILES_DIR"
 
-mkdir -p "$CONFIG_DIR" "$BIN_DIR"
+mkdir -p "$CONFIG_DIR" "$BIN_DIR" "$HOME/Music/radio_captures"
 
 link_item() {
     local src="$1"
@@ -44,5 +44,21 @@ done
 
 # 3. Git config
 link_item "$DOTFILES_DIR/.gitconfig" "$HOME/.gitconfig"
+
+# 4. Dependency check for system tools (save-current-track)
+echo "==> Checking runtime dependencies for tools..."
+missing_pkgs=()
+for cmd in ffmpeg songrec playerctl jq wl-copy notify-send socat; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing_pkgs+=("$cmd")
+    fi
+done
+
+if [ ${#missing_pkgs[@]} -gt 0 ]; then
+    echo "  [warn] Missing tools: ${missing_pkgs[*]}"
+    echo "  [hint] Arch install: sudo pacman -S --needed ffmpeg playerctl jq libnotify wl-clipboard socat && paru -S songrec"
+else
+    echo "  [ok]   All runtime dependencies are installed!"
+fi
 
 echo "==> Dotfiles deployed successfully!"
