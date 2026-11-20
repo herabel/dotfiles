@@ -70,7 +70,7 @@ if [[ -n "$radio_status" && -f "$radio_status" ]]; then
 
     if [[ "$is_running" == "true" && "$is_paused" != "true" && -n "$title" ]]; then
         track="$title"
-        source_label="Радио: ${station_name:-Интернет-радио}"
+        source_label="Radio: ${station_name:-Web Radio}"
         source_tag="${station_name:-Radio}"
 
         # Check for generic mpv IPC socket to grab direct digital stream
@@ -89,7 +89,6 @@ if [[ -z "$track" ]] && command -v playerctl >/dev/null 2>&1; then
         artist=$(playerctl metadata --format '{{ artist }}' 2>/dev/null || true)
         title=$(playerctl metadata --format '{{ title }}' 2>/dev/null || true)
 
-        # Ignore generic video/browser channel placeholders
         if [[ -n "$title" && -n "$artist" && "$artist" != "$title" ]]; then
             track="${artist} — ${title}"
             has_exact_metadata=true
@@ -100,20 +99,20 @@ if [[ -z "$track" ]] && command -v playerctl >/dev/null 2>&1; then
             fi
         fi
 
-        source_label="Плеер: ${player_name}"
+        source_label="Player: ${player_name}"
         source_tag="${player_name}"
     fi
 fi
 
 # 3. Fallback: generic system desktop audio
 if [[ -z "$track" ]]; then
-    source_label="Система: Рабочий стол"
+    source_label="Desktop"
     source_tag="Desktop"
-    track="Аудиопоток"
+    track="Audio Stream"
 fi
 
 # Copy immediate known title to clipboard
-if [[ "$track" != "Аудиопоток" ]]; then
+if [[ "$track" != "Audio Stream" ]]; then
     copy_to_clipboard "$track"
 fi
 
@@ -146,7 +145,7 @@ run_record_and_shazam() {
 
     if [[ ! -s "$temp_file" ]]; then
         if command -v notify-send >/dev/null 2>&1; then
-            notify-send -u low -i dialog-warning "Запись звука" "Не удалось записать аудиопоток"
+            notify-send -u low -i dialog-warning "Audio Capture" "Failed to record audio stream"
         fi
         rm -f "$temp_file"
         return 1
@@ -158,7 +157,7 @@ run_record_and_shazam() {
     if [[ "$max_vol" == "-inf" || $(awk "BEGIN {print ($max_vol < -65.0)}") -eq 1 ]] 2>/dev/null; then
         rm -f "$temp_file"
         if command -v notify-send >/dev/null 2>&1; then
-            notify-send -u low -i audio-volume-muted "Музыка" "В системе сейчас тишина — запись отменена"
+            notify-send -u low -i audio-volume-muted "Audio" "Silence detected"
         fi
         return 0
     fi
@@ -178,63 +177,40 @@ run_record_and_shazam() {
 
     local cur_time
     cur_time=$(date '+%Y-%m-%d %H:%M')
+    local final_track=""
 
     # Case A: Shazam found a match
     if [[ -n "$shazam_title" ]]; then
-        local recognized="${shazam_artist} — ${shazam_title}"
-        local safe_title
-        safe_title=$(sanitize_filename "$recognized")
-        local final_file="$captures_dir/${ts}_[${safe_source}]_${safe_title}.mp3"
-
-        mv "$temp_file" "$final_file"
-
-        # Update clipboard with recognized track
-        copy_to_clipboard "$recognized"
-
-        # Log recognized track
-        echo "[$cur_time] [${source_display}] 🔍 Shazam: $recognized (Источник: $raw_track) -> $(basename "$final_file")" >> "$log_file"
-
-        if command -v notify-send >/dev/null 2>&1; then
-            notify-send -u normal -i audio-x-generic "🎵 Shazam: найден трек!" "$recognized\nСкопировано в буфер | $(basename "$final_file")"
-        fi
-
-    # Case B: Shazam has no match, BUT we have exact/parsed metadata from player or stream
-    elif [[ "$raw_track" != "Аудиопоток" && -n "$raw_track" ]]; then
-        local safe_known
-        safe_known=$(sanitize_filename "$raw_track")
-        local final_file="$captures_dir/${ts}_[${safe_source}]_${safe_known}.mp3"
-
-        mv "$temp_file" "$final_file"
-        copy_to_clipboard "$raw_track"
-
-        if [[ "$is_exact" == "true" ]]; then
-            echo "[$cur_time] [${source_display}] $raw_track -> $(basename "$final_file")" >> "$log_file"
-            if command -v notify-send >/dev/null 2>&1; then
-                notify-send -u normal -i audio-x-generic "🎵 Трек сохранён!" "$raw_track\nСкопировано в буфер | $(basename "$final_file")"
-            fi
-        else
-            echo "[$cur_time] [${source_display}] $raw_track -> $(basename "$final_file") (Shazam: без совпадений)" >> "$log_file"
-            if command -v notify-send >/dev/null 2>&1; then
-                notify-send -u low -i audio-speakers "💾 Сэмпл сохранён" "$raw_track\nФайл: $(basename "$final_file") (в Shazam нет)"
-            fi
-        fi
-
-    # Case C: Pure anonymous desktop audio without metadata and no Shazam match
+        final_track="${shazam_artist} — ${shazam_title}"
+    # Case B: Player/stream already has metadata
+    elif [[ "$raw_track" != "Audio Stream" && -n "$raw_track" ]]; then
+        final_track="$raw_track"
+    # Case C: Unknown audio stream
     else
-        local final_file="$captures_dir/${ts}_[${safe_source}]_unmatched.mp3"
-        mv "$temp_file" "$final_file"
+        final_track="Unknown Track"
+    fi
 
-        echo "[$cur_time] [${source_display}] Неизвестный трек -> $(basename "$final_file") (Shazam: без совпадений)" >> "$log_file"
+    local safe_final
+    safe_final=$(sanitize_filename "$final_track")
+    local final_file="$captures_dir/${ts}_[${safe_source}]_${safe_final}.mp3"
 
-        if command -v notify-send >/dev/null 2>&1; then
-            notify-send -u low -i audio-speakers "💾 Сэмпл сохранён" "Неизвестный трек\nФайл: $(basename "$final_file") (в Shazam нет)"
-        fi
+    mv "$temp_file" "$final_file"
+
+    if [[ "$final_track" != "Unknown Track" ]]; then
+        copy_to_clipboard "$final_track"
+    fi
+
+    # Clean, concise log line (zero bloat)
+    echo "[$cur_time] [${source_display}] $final_track" >> "$log_file"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u normal -i audio-x-generic "Saved: $source_display" "$final_track"
     fi
 }
 
 # Immediate feedback notification
 if command -v notify-send >/dev/null 2>&1; then
-    notify-send -u normal -i audio-x-generic "$source_label" "$track\nСохраняю и проверяю через Shazam..."
+    notify-send -u low -i audio-headphones "$source_label" "$track"
 fi
 
 # Run background recording & recognition
