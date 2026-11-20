@@ -5,8 +5,8 @@
 *.swo
 *~
 
-# Neovim local state
-.ryoku-*
+# Generated/vendor state
+*ryoku*
 .netrwhist
 
 # OS junk
